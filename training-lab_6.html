@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Training Lab</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script>tailwind.config={theme:{extend:{fontFamily:{display:['Barlow Condensed','system-ui','sans-serif']}}}}</script>
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-is@18.3.1/umd/react-is.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.25.6/babel.min.js"></script>
+<style>
+body{background:#08090d;color:#e4e4e7;font-family:system-ui,-apple-system,sans-serif}
+.card{background:#0e1117;border:1px solid #1a1f2a;border-radius:14px}
+.inp{background:transparent;border-bottom:1px solid #262c3a;outline:none;padding:2px 4px;min-width:0;width:100%}
+.inp:focus{border-color:var(--ac,#a78bfa)}
+.btn{padding:.55rem 1rem;border-radius:10px;font-weight:600;font-size:.875rem;background:var(--ac,#a78bfa);color:#08090d}
+.btn:disabled{opacity:.4}
+.ghost{background:transparent;color:#a1a1aa;border:1px solid #262c3a}
+select.inp option{background:#0e1117}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useMemo}=React;
+const {LineChart,Line,XAxis,YAxis,Tooltip,CartesianGrid,ResponsiveContainer,Legend}=Recharts;
+
+/* ---------- costanti ---------- */
+const SP={corsa:{n:'Corsa',c:'#a78bfa'},ciclismo:{n:'Ciclismo',c:'#fb923c'},nuoto:{n:'Nuoto',c:'#38bdf8'}};
+const MU={spalle:'Spalle',pettorali:'Pettorali',dorsali:'Dorsali',bicipiti:'Bicipiti',tricipiti:'Tricipiti',core:'Core',glutei:'Glutei',quadricipiti:'Quadricipiti',femorali:'Femorali',polpacci:'Polpacci'};
+// carico muscolare per minuto di attività, per sport
+const LOAD={
+  corsa:{quadricipiti:.8,femorali:.6,glutei:.7,polpacci:.9,core:.5},
+  ciclismo:{quadricipiti:1,glutei:.7,polpacci:.4,femorali:.4,core:.35},
+  nuoto:{spalle:.9,dorsali:1,pettorali:.7,tricipiti:.6,bicipiti:.3,core:.6}};
+const FIX={spalle:'Alzate laterali, face pull',pettorali:'Push-up, panca con manubri',dorsali:'Trazioni, lat machine',bicipiti:'Curl con manubri',tricipiti:'Dip alla panca, french press',core:'Plank, dead bug',glutei:'Hip thrust, ponte glutei',quadricipiti:'Squat, affondi',femorali:'Stacchi rumeni, leg curl',polpacci:'Calf raise'};
+const MIN_KM={corsa:6,ciclismo:2.5,nuoto:25}; // minuti per km, solo se manca la durata
+
+/* ---------- utilità ---------- */
+const ls=(k,d)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch{return d}};
+const sv=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}};
+const useLS=(k,d)=>{const[s,set]=useState(()=>ls(k,d));useEffect(()=>sv(k,s),[k,s]);return[s,set]};
+const today=()=>new Date().toISOString().slice(0,10);
+// ridimensiona (max 2000 px) e comprime: 10 screenshot restano sotto il limite di richiesta di Gemini
+const shrink=f=>new Promise((ok,ko)=>{const i=new Image(),u=URL.createObjectURL(f);i.onload=()=>{const s=Math.min(1,2000/Math.max(i.width,i.height)),c=document.createElement('canvas');c.width=Math.round(i.width*s);c.height=Math.round(i.height*s);c.getContext('2d').drawImage(i,0,0,c.width,c.height);URL.revokeObjectURL(u);ok(c.toDataURL('image/jpeg',.9).split(',')[1])};i.onerror=()=>ko(new Error('Immagine non leggibile: usa PNG o JPEG.'));i.src=u});
+const fx=x=>isFinite(x)?x.toFixed(1):'—';
+
+// Chiamata diretta dal browser a Gemini (piano gratuito di Google AI Studio)
+async function gem(parts,json=true){
+  const key=ls('tl_key',''),model=ls('tl_model','gemini-2.5-flash');
+  if(!key)throw new Error('Manca la GEMINI_API_KEY: incollala in Impostazioni.');
+  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{
+    method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':key},
+    body:JSON.stringify({contents:[{role:'user',parts}],generationConfig:{temperature:.3,...(json?{responseMimeType:'application/json'}:{})}})});
+  const d=await r.json();
+  if(!r.ok)throw new Error(d.error?.message||'Errore Gemini '+r.status);
+  const t=(d.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('');
+  try{return JSON.parse(t.replace(/```json|```/g,'').trim())}catch{throw new Error('Gemini ha risposto in un formato non valido: riprova.')}
+}
+
+const EXTRACT=`Sei un analista di allenamento. Ricevi da 1 a 10 screenshot dello STESSO allenamento, provenienti da un’app di fitness tracker: uniscili in un’unica analisi, senza duplicati. Estrai TUTTI i dati numerici e testuali visibili, senza tralasciarne nessuno: distanza, durata, passo, velocità, tempi sul giro e split, cadenza, dislivello, frequenza cardiaca (media, massima, zone), calorie, vasche, stili, SWOLF, bracciate, potenza, ecc. Non inventare: se un dato non si vede, non includerlo.
+Per OGNI dato scrivi nel campo "valutazione" un commento specifico in italiano (1-2 frasi, concreto, rispetto a valori tipici di un amatore).
+Nel campo "consigli" scrivi 3-5 frasi su cosa mangiare e bere dopo QUESTO allenamento in modo sano e corretto (tempistica, carboidrati, proteine, idratazione e sali, alimenti concreti), calibrate su sport, durata e intensità visibili: sono consigli generici, non indicazioni mediche.
+Rispondi SOLO con JSON: {"sport":"corsa|ciclismo|nuoto","data":"YYYY-MM-DD oppure null","distanza_km":numero|null,"durata_min":numero|null,"fc_media":numero|null,"riepilogo":"2 frasi","consigli":"3-5 frasi","metriche":[{"etichetta":"","valore":"","unita":"","valutazione":""}]}`;
+
+// carico muscolare degli ultimi N giorni
+function load(ws,days=30){
+  const t=Date.now()-days*864e5,L={};Object.keys(MU).forEach(k=>L[k]=0);
+  ws.filter(w=>new Date(w.date)>=t).forEach(w=>{
+    const m=w.min||w.km*MIN_KM[w.sport];
+    Object.entries(LOAD[w.sport]).forEach(([k,c])=>L[k]+=c*m)});
+  return L;
+}
+
+/* ---------- mappa muscolare SVG ---------- */
+// [muscolo, vista(0 fronte/1 retro), scarto dal centro, y, rx, ry, inclinazione]
+const ML=[['spalle',0,26,53,8,9,0],['pettorali',0,9,68,11,9,0],['bicipiti',0,31,86,5,14,8],['core',0,0,102,11,24,0],['quadricipiti',0,10,192,9,34,0],
+['spalle',1,26,53,8,9,0],['dorsali',1,10,80,11,20,0],['tricipiti',1,31,86,5,14,8],['core',1,0,120,8,13,0],['glutei',1,9,158,10,11,0],['femorali',1,10,205,8,28,0],['polpacci',1,10,268,7,22,0]];
+function BodyMap({lv,color}){
+  const C=[55,165];
+  return(<svg viewBox="0 0 220 322" className="w-full max-w-[300px] mx-auto">
+    <defs><filter id="gl" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+    {C.map((c,v)=><g key={v} strokeLinecap="round" strokeLinejoin="round" fill="none">
+      <circle cx={c} cy="20" r="13" fill="#0f131b" stroke="#1d2330" strokeWidth="2"/>
+      <rect x={c-19} y="40" width="38" height="108" rx="14" fill="#0f131b" stroke="#1d2330" strokeWidth="2"/>
+      {[-1,1].map(s=><g key={s}>
+        <line x1={c+s*27} y1="50" x2={c+s*38} y2="140" stroke="#0f131b" strokeWidth="11"/>
+        <polyline points={`${c+s*10},148 ${c+s*9},225 ${c+s*10},305`} stroke="#0f131b" strokeWidth="19"/></g>)}
+    </g>)}
+    {ML.map(([id,v,dx,y,rx,ry,rot],i)=>{const l=lv[id]||0,c=C[v];
+      return(dx?[-1,1]:[1]).map(s=><ellipse key={i+'_'+s} cx={c+s*dx} cy={y} rx={rx} ry={ry}
+        transform={`rotate(${-s*rot} ${c+s*dx} ${y})`} fill={l>0?color:'#171c27'} fillOpacity={l>0?.25+.75*l:1} filter={l>.5?'url(#gl)':undefined}/>)})}
+    <text x="55" y="319" textAnchor="middle" fontSize="9" fill="#52525b">fronte</text>
+    <text x="165" y="319" textAnchor="middle" fontSize="9" fill="#52525b">retro</text>
+  </svg>);
+}
+
+/* ---------- 1. Upload, OCR e valutazione ---------- */
+function Analyze({ws,setWs}){
+  const[files,setFiles]=useState([]),[busy,setBusy]=useState(false),[err,setErr]=useState(''),[r,setR]=useState(null),[open,setOpen]=useState(null);
+  const prev=useMemo(()=>files.map(f=>URL.createObjectURL(f)),[files]);
+  const add=fl=>{const a=[...files,...fl.filter(f=>f.type.startsWith('image/'))];setFiles(a.slice(0,10));setR(null);setErr(a.length>10?'Massimo 10 screenshot: ho tenuto i primi 10.':'')};
+  const wrap=async fn=>{setBusy(true);setErr('');try{await fn()}catch(e){setErr(e.message)}setBusy(false)};
+  const run=()=>wrap(async()=>{
+    const d=await gem([{text:EXTRACT},...(await Promise.all(files.map(async f=>({inline_data:{mime_type:'image/jpeg',data:await shrink(f)}}))))]);
+    setR({...d,sport:SP[d.sport]?d.sport:'corsa',data:d.data||today(),metriche:d.metriche||[]})});
+  const reeval=()=>wrap(async()=>{
+    const d=await gem([{text:`Sport: ${r.sport}. Dati confermati dall’utente: ${JSON.stringify(r.metriche.map(({etichetta,valore,unita})=>({etichetta,valore,unita})))}. Per ogni dato, nello stesso ordine, scrivi una valutazione specifica in italiano (1-2 frasi). Rispondi solo con JSON: {"valutazioni":["..."]}`}]);
+    setR(x=>({...x,metriche:x.metriche.map((m,i)=>({...m,valutazione:d.valutazioni?.[i]||m.valutazione}))}))});
+  const set=(k,v)=>setR(x=>({...x,[k]:v}));
+  const setM=(i,k,v)=>setR(x=>({...x,metriche:x.metriche.map((m,j)=>j===i?{...m,[k]:v}:m)}));
+  const save=()=>{setWs([...ws,{id:Date.now(),sport:r.sport,date:r.data,km:+r.distanza_km||0,min:+r.durata_min||0,hr:+r.fc_media||0,metrics:r.metriche,riepilogo:r.riepilogo||'',consigli:r.consigli||'',pasto:r.pasto||'',giudizio:r.giudizio||''}]);setR(null);setFiles([])};
+  const ac=r?SP[r.sport].c:'#a78bfa';
+  return(<div className="grid lg:grid-cols-[340px_1fr] gap-5" style={{'--ac':ac}}>
+    <div className="space-y-3">
+      <div className="card p-4 space-y-3"><label onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();add([...e.dataTransfer.files])}} className="block border border-dashed border-zinc-700 rounded-xl p-5 text-center cursor-pointer">
+        <div className="font-display text-2xl">Carica gli screenshot</div><p className="text-sm text-zinc-500 mt-1">Fino a 10 schermate dello stesso allenamento ({files.length}/10). Trascinale qui o tocca per sceglierle.</p>
+        <input type="file" accept="image/*" multiple hidden onChange={e=>{add([...e.target.files]);e.target.value=''}}/>
+      </label>
+      {!!prev.length&&<div className="grid grid-cols-5 gap-2">{prev.map((u,i)=><div key={u} className="relative"><img src={u} className="rounded aspect-[9/16] object-cover w-full" alt={'Screenshot '+(i+1)}/><button aria-label="Rimuovi screenshot" className="absolute top-0 right-0 bg-black/70 rounded px-1 text-xs" onClick={()=>setFiles(files.filter((_,j)=>j!==i))}>✕</button></div>)}</div>}
+      <button className="btn w-full" disabled={!files.length||busy} onClick={run}>{busy?'Gemini sta leggendo…':files.length>1?`Estrai i dati da ${files.length} screenshot`:'Estrai tutti i dati'}</button></div>
+      {err&&<p className="text-sm text-rose-400">{err}</p>}
+    </div>
+    <div>{!r?<div className="card p-4">
+      <h3 className="font-display text-xl mb-2">Allenamenti salvati</h3>
+      {ws.length?[...ws].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,10).map(w=><div key={w.id} className="border-t border-white/5"><div className="flex items-center gap-3 py-2 text-sm">
+        <i className="w-2 h-2 rounded-full" style={{background:SP[w.sport].c}}/><span className="text-zinc-400 w-24">{w.date}</span><span>{SP[w.sport].n}</span>
+        <button className="ml-auto text-xs text-zinc-400 hover:text-white" onClick={()=>setOpen(open===w.id?null:w.id)}>{open===w.id?'Chiudi':'Cibo e consigli'}</button><span>{w.km} km</span><button aria-label="Elimina" className="text-zinc-600 hover:text-rose-400" onClick={()=>setWs(ws.filter(x=>x.id!==w.id))}>✕</button></div>
+        {open===w.id&&<div className="pb-3"><Nutrition w={w} ac={SP[w.sport].c} patch={p=>setWs(cur=>cur.map(x=>x.id===w.id?{...x,...p}:x))}/></div>}</div>)
+        :<p className="text-sm text-zinc-500">Ancora nessun allenamento. Carica il primo screenshot per iniziare.</p>}
+    </div>:<div className="space-y-3">
+      <div className="card p-4 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs text-zinc-500">
+        <label>Sport<select className="inp mt-1 text-sm text-zinc-100" value={r.sport} onChange={e=>set('sport',e.target.value)}>{Object.entries(SP).map(([k,v])=><option key={k} value={k}>{v.n}</option>)}</select></label>
+        {[['data','Data','date'],['distanza_km','Km','number'],['durata_min','Minuti','number'],['fc_media','FC media','number']].map(([k,l,t])=>
+          <label key={k}>{l}<input type={t} className="inp mt-1 text-sm text-zinc-100" value={r[k]??''} onChange={e=>set(k,e.target.value)}/></label>)}
+      </div>
+      {r.riepilogo&&<p className="text-sm text-zinc-400 px-1">{r.riepilogo}</p>}
+      {r.metriche.map((m,i)=><div key={i} className="card p-3">
+        <div className="flex items-end gap-2">
+          <input className="inp !w-2/5 text-xs text-zinc-500" placeholder="Dato" value={m.etichetta} onChange={e=>setM(i,'etichetta',e.target.value)}/>
+          <input className="inp font-display text-2xl" value={m.valore} onChange={e=>setM(i,'valore',e.target.value)}/>
+          <input className="inp !w-16 text-xs text-zinc-500" placeholder="unità" value={m.unita} onChange={e=>setM(i,'unita',e.target.value)}/>
+          <button aria-label="Rimuovi dato" className="text-zinc-600 hover:text-rose-400 px-1" onClick={()=>setR(x=>({...x,metriche:x.metriche.filter((_,j)=>j!==i)}))}>✕</button>
+        </div>
+        <p className="mt-2 text-sm text-zinc-400 border-l-2 pl-3" style={{borderColor:ac}}>{m.valutazione||'Nessuna valutazione'}</p>
+      </div>)}
+      <Nutrition w={r} ac={ac} patch={p=>setR(x=>({...x,...p}))}/>
+      <div className="flex flex-wrap gap-2">
+        <button className="btn ghost" onClick={()=>setR(x=>({...x,metriche:[...x.metriche,{etichetta:'',valore:'',unita:'',valutazione:''}]}))}>Aggiungi dato</button>
+        <button className="btn ghost" disabled={busy} onClick={reeval}>{busy?'Valuto…':'Rivaluta i dati corretti'}</button>
+        <button className="btn ml-auto" onClick={save}>Salva allenamento</button>
+      </div>
+      {err&&<p className="text-sm text-rose-400">{err}</p>}
+    </div>}</div>
+  </div>);
+}
+
+/* ---------- Cibo dopo l’allenamento ---------- */
+function Nutrition({w,patch,ac}){
+  const[busy,setBusy]=useState(false),[err,setErr]=useState('');
+  const km=w.km??w.distanza_km,mi=w.min??w.durata_min,peso=ls('tl_body',{}).w;
+  const go=async()=>{setBusy(true);setErr('');try{
+    const d=await gem([{text:`Allenamento: ${SP[w.sport].n}, ${km||'?'} km, ${mi||'?'} minuti. ${w.riepilogo||''} Peso dell’utente: ${peso||'?'} kg.
+Dopo l’allenamento ha mangiato: “${w.pasto}”.
+Valuta il pasto in modo realistico: stima a grandi linee proteine, carboidrati e idratazione, la tempistica e quanto serve davvero al recupero. Tono sarcastico e pungente ma mai offensivo: nessuna battuta sul corpo o sul peso, nessuna restrizione calorica. Chiudi con un consiglio pratico per il prossimo pasto. Massimo 6 frasi, in italiano.
+Rispondi SOLO con JSON: {"giudizio":""}`}]);
+    patch({giudizio:d.giudizio||''})
+  }catch(e){setErr(e.message)}setBusy(false)};
+  return(<div className="card p-4 space-y-3" style={{'--ac':ac}}>
+    {w.consigli&&<div><h4 className="font-display text-xl">Cosa mangiare dopo</h4><p className="text-sm text-zinc-300 mt-1">{w.consigli}</p><p className="text-xs text-zinc-500 mt-1">Consigli generici: non sostituiscono il parere di un medico o di un nutrizionista.</p></div>}
+    <div><h4 className="font-display text-xl">Cosa hai mangiato?</h4>
+      <textarea className="w-full mt-1 bg-transparent border border-zinc-800 rounded-lg p-2 text-sm outline-none focus:border-[var(--ac)] min-h-[64px]" placeholder="Es. pasta al pesto e una banana, poi un gelato" value={w.pasto||''} onChange={e=>patch({pasto:e.target.value})}/></div>
+    <button className="btn" disabled={busy||!(w.pasto||'').trim()} onClick={go}>{busy?'Sto preparando il verdetto…':'Valuta il mio pasto'}</button>
+    {err&&<p className="text-sm text-rose-400">{err}</p>}
+    {w.giudizio&&<p className="text-sm text-zinc-200 border-l-2 pl-3" style={{borderColor:ac}}>{w.giudizio}</p>}
+  </div>);
+}
+
+/* ---------- 2. Swim planner e mappa muscolare ---------- */
+const MODS=['Apnea 25m','Trascinamento con maglietta','Variazioni di stile','Gambe con tavoletta','Pull buoy','Drills di tecnica','Scatti'];
+function Swim(){
+  const[tot,setTot]=useState(2750),[mods,setMods]=useState(MODS.slice(0,3)),[lv,setLv]=useState('intermedio'),[plan,setPlan]=useState(null),[busy,setBusy]=useState(false),[err,setErr]=useState('');
+  const gen=async()=>{setBusy(true);setErr('');try{
+    setPlan(await gem([{text:`Crea una scheda di nuoto in vasca da 25 m di circa ${tot} metri totali, livello ${lv}. Includi obbligatoriamente questi moduli: ${mods.join(', ')||'nessuno in particolare'}. Struttura: riscaldamento, tecnica, serie principale, defaticamento. Le apnee sono blocchi da 25 m con recuperi ampi e sicuri (mai da soli, mai iperventilare prima). Il trascinamento con maglietta indossata aumenta la resistenza: dosalo con prudenza. "metri" di ogni blocco = ripetute × distanza e la somma deve fare ${tot} ±100. Per ogni blocco indica i muscoli coinvolti scegliendo SOLO tra: ${Object.keys(MU).join(', ')}.
+Rispondi SOLO con JSON: {"titolo":"","blocchi":[{"nome":"","ripetute":0,"distanza":0,"recupero":"","descrizione":"","metri":0,"muscoli":[""]}]}`}]))
+  }catch(e){setErr(e.message)}setBusy(false)};
+  const bl=plan?.blocchi||[],sum=bl.reduce((a,b)=>a+(+b.metri||0),0);
+  const lvl=useMemo(()=>{const L={};bl.forEach(b=>(b.muscoli||[]).forEach(k=>{if(MU[k])L[k]=(L[k]||0)+(+b.metri||0)}));const mx=Math.max(1,...Object.values(L));Object.keys(L).forEach(k=>L[k]/=mx);return L},[plan]);
+  return(<div className="grid lg:grid-cols-[1fr_340px] gap-5" style={{'--ac':'#38bdf8'}}>
+    <div className="space-y-3">
+      <div className="card p-4 space-y-4">
+        <div><div className="flex justify-between text-sm"><span>Distanza totale</span><span className="font-display text-2xl text-sky-400">{tot} m</span></div>
+          <input type="range" min="2500" max="3000" step="50" value={tot} onChange={e=>setTot(+e.target.value)} className="w-full accent-sky-400"/></div>
+        <div className="flex flex-wrap gap-2">{MODS.map(m=><button key={m} onClick={()=>setMods(x=>x.includes(m)?x.filter(y=>y!==m):[...x,m])}
+          className={'px-3 py-1 rounded-full text-sm border '+(mods.includes(m)?'bg-sky-400/15 border-sky-400 text-sky-300':'border-zinc-700 text-zinc-500')}>{m}</button>)}</div>
+        <div className="flex gap-2 items-center">
+          <select className="inp !w-40 text-sm" value={lv} onChange={e=>setLv(e.target.value)}>{['principiante','intermedio','avanzato'].map(l=><option key={l}>{l}</option>)}</select>
+          <button className="btn ml-auto" disabled={busy} onClick={gen}>{busy?'Genero la scheda…':'Genera scheda'}</button></div>
+        <p className="text-xs text-zinc-500">Apnea: mai da soli e mai iperventilare prima, il rischio di svenimento in acqua è reale.</p>
+        {err&&<p className="text-sm text-rose-400">{err}</p>}
+      </div>
+      {plan&&<div className="card p-4">
+        <div className="flex justify-between items-baseline"><h3 className="font-display text-2xl">{plan.titolo||'Scheda di oggi'}</h3><span className="font-display text-xl text-sky-400">{sum} m</span></div>
+        {bl.map((b,i)=><div key={i} className="py-3 border-t border-white/5">
+          <div className="flex justify-between gap-3"><b className="font-medium">{b.nome}</b><span className="text-sky-300 text-sm whitespace-nowrap">{b.ripetute}×{b.distanza} m, rec {b.recupero}</span></div>
+          <p className="text-sm text-zinc-400 mt-1">{b.descrizione}</p></div>)}
+      </div>}
+    </div>
+    <div className="card p-4 lg:sticky lg:top-20 self-start">
+      <h3 className="font-display text-xl mb-2">Muscoli coinvolti oggi</h3>
+      <BodyMap lv={lvl} color="#38bdf8"/>
+      <div className="flex flex-wrap gap-1.5 mt-3">{Object.entries(lvl).sort((a,b)=>b[1]-a[1]).map(([k,v])=><span key={k} className="text-xs px-2 py-0.5 rounded-full" style={{background:`rgba(56,189,248,${.1+.3*v})`,color:'#bae6fd'}}>{MU[k]} {Math.round(v*100)}%</span>)}
+        {!plan&&<p className="text-sm text-zinc-500">Genera una scheda per vedere i muscoli illuminarsi.</p>}</div>
+    </div>
+  </div>);
+}
+
+/* ---------- 3. Fisiologia e tonificazione ---------- */
+function Body({ws}){
+  const[b,setB]=useLS('tl_body',{h:176,w:69,age:30,sex:'M',bf:''});
+  const f=k=>e=>setB({...b,[k]:k==='sex'||e.target.value===''?e.target.value:+e.target.value});
+  const m=b.sex==='M'?1:0,bmi=b.w/((b.h/100)**2);
+  // stime: massa grassa con Deurenberg (o valore misurato), massa muscolare scheletrica con Lee et al. 2000
+  const bf=b.bf!==''?+b.bf:Math.max(3,1.2*bmi+.23*b.age-10.8*m-5.4),fat=b.w*bf/100,lean=b.w-fat,smm=Math.max(0,.244*b.w+7.8*b.h/100+6.6*m-.098*b.age-3.3);
+  const L=useMemo(()=>load(ws),[ws]),mx=Math.max(0,...Object.values(L));
+  const lvl=Object.fromEntries(Object.entries(L).map(([k,v])=>[k,mx?v/mx:0]));
+  const weak=Object.entries(lvl).filter(([,v])=>v<.35).sort((a,c)=>a[1]-c[1]);
+  const need=Object.fromEntries(weak.map(([k,v])=>[k,1-v]));
+  return(<div className="space-y-5" style={{'--ac':'#a78bfa'}}>
+    <div className="card p-4 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs text-zinc-500">
+      {[['h','Altezza (cm)'],['w','Peso (kg)'],['age','Età'],['bf','Massa grassa % misurata']].map(([k,l])=><label key={k}>{l}<input type="number" className="inp mt-1 text-base text-zinc-100" value={b[k]} placeholder={k==='bf'?'facoltativa':''} onChange={f(k)}/></label>)}
+      <label>Sesso<select className="inp mt-1 text-base text-zinc-100" value={b.sex} onChange={f('sex')}><option value="M">Uomo</option><option value="F">Donna</option></select></label>
+    </div>
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      {[['Massa magra',fx(lean)+' kg',fx(lean/b.w*100)+'% del peso'],['Massa grassa',fx(fat)+' kg',fx(bf)+'%'],['Massa muscolare',fx(smm)+' kg',fx(smm/b.w*100)+'% del peso'],['BMI',fx(bmi),'altezza e peso']].map(([t,v,s])=>
+        <div key={t} className="card p-4"><div className="text-xs text-zinc-500">{t}</div><div className="font-display text-4xl mt-1">{v}</div><div className="text-xs text-zinc-500">{s}</div></div>)}
+    </div>
+    <p className="text-xs text-zinc-500">Sono stime da formule (Deurenberg per la massa grassa, Lee per la muscolare scheletrica), non misure cliniche.</p>
+    <div className="grid lg:grid-cols-[1fr_320px] gap-5">
+      <div className="card p-4">
+        <h3 className="font-display text-xl">Tonificazione: carico degli ultimi 30 giorni</h3>
+        {mx?<div className="mt-3 space-y-2">{Object.entries(lvl).sort((a,c)=>a[1]-c[1]).map(([k,v])=><div key={k} className="grid grid-cols-[100px_1fr_auto] items-center gap-3 text-sm">
+          <span>{MU[k]}</span><div className="h-2 rounded bg-zinc-800"><div className="h-2 rounded" style={{width:Math.max(3,v*100)+'%',background:v<.35?'#fb7185':'#a78bfa'}}/></div>
+          <span className="text-xs text-zinc-500 w-48 truncate">{v<.35?'Da potenziare: '+FIX[k]:''}</span></div>)}</div>
+        :<p className="text-sm text-zinc-500 mt-2">Salva qualche allenamento per vedere quali gruppi muscolari restano indietro.</p>}
+      </div>
+      <div className="card p-4"><h3 className="font-display text-xl mb-2">Da potenziare</h3><BodyMap lv={need} color="#fb7185"/></div>
+    </div>
+  </div>);
+}
+
+/* ---------- 4. Annual recap ---------- */
+const MS=['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
+function demo(){
+  const now=new Date(),Y=now.getFullYear(),o=[];let id=Date.now();
+  for(let m=0;m<=now.getMonth();m++)for(const s of Object.keys(SP))for(let k=0;k<4;k++){
+    const date=`${Y}-${String(m+1).padStart(2,'0')}-${String(3+k*6).padStart(2,'0')}`;if(new Date(date)>now)continue;
+    const km=s==='corsa'?6+Math.random()*4+m*.3:s==='ciclismo'?30+Math.random()*25+m:1.5+Math.random()*.5+m*.03;
+    const pace=s==='corsa'?6-m*.07+Math.random()*.2:s==='ciclismo'?2.3-m*.015+Math.random()*.08:25-m*.4+Math.random();
+    o.push({id:id++,demo:1,sport:s,date,km:+km.toFixed(1),min:Math.round(km*pace),hr:0,metrics:[]})}
+  return o;
+}
+function Recap({ws,setWs}){
+  const yrs=[...new Set(ws.map(w=>+w.date.slice(0,4)).concat(new Date().getFullYear()))].sort();
+  const[y,setY]=useState(yrs[yrs.length-1]);
+  const yw=ws.filter(w=>w.date.startsWith(y)),S=Object.keys(SP);
+  const mon=MS.map((n,i)=>{const o={m:n};S.forEach(s=>{const a=yw.filter(w=>+w.date.slice(5,7)===i+1&&w.sport===s),km=a.reduce((x,w)=>x+w.km,0),mi=a.reduce((x,w)=>x+w.min,0);
+    o[s]=+km.toFixed(1);o['p_'+s]=km&&mi?(s==='ciclismo'?km/(mi/60):mi/km/(s==='nuoto'?10:1)):null});return o});
+  // indice di miglioramento % rispetto al primo mese con dati (passo più basso o velocità più alta = upgrade)
+  const base={};S.forEach(s=>base[s]=mon.find(o=>o['p_'+s])?.['p_'+s]);
+  const tr=mon.map(o=>{const r={m:o.m};S.forEach(s=>{const p=o['p_'+s],b=base[s];r[s]=p&&b?+((s==='ciclismo'?p/b-1:1-p/b)*100).toFixed(1):null});return r});
+  const last=s=>[...tr].reverse().find(r=>r[s]!=null)?.[s];
+  const tip={contentStyle:{background:'#0e1117',border:'1px solid #262c3a',borderRadius:8}};
+  const ax={stroke:'#52525b',fontSize:12};
+  return(<div className="space-y-5">
+    <div className="flex items-center gap-3"><h2 className="font-display text-3xl">Year in sport</h2>
+      <select className="inp !w-24 text-lg" value={y} onChange={e=>setY(e.target.value)}>{yrs.map(v=><option key={v}>{v}</option>)}</select>
+      <span className="ml-auto flex gap-2">{!ws.length&&<button className="btn ghost" onClick={()=>setWs(demo())}>Carica dati demo</button>}
+        {ws.some(w=>w.demo)&&<button className="btn ghost" onClick={()=>setWs(ws.filter(w=>!w.demo))}>Rimuovi dati demo</button>}</span></div>
+    <div className="grid sm:grid-cols-3 gap-3">{S.map(s=>{const a=yw.filter(w=>w.sport===s),v=last(s);return(
+      <div key={s} className="card p-4" style={{borderTop:`3px solid ${SP[s].c}`}}>
+        <div className="text-sm text-zinc-400">{SP[s].n}</div>
+        <div className="font-display text-5xl" style={{color:SP[s].c}}>{fx(a.reduce((x,w)=>x+w.km,0))}<span className="text-xl text-zinc-500"> km</span></div>
+        <div className="text-xs text-zinc-500">{a.length} sessioni, {fx(a.reduce((x,w)=>x+w.min,0)/60)} ore</div>
+        <div className={'text-sm mt-2 '+(v>0?'text-emerald-400':v<0?'text-rose-400':'text-zinc-500')}>{v==null?'Dati insufficienti':v>0?`▲ Upgrade ${v}%`:v<0?`▼ Downgrade ${Math.abs(v)}%`:'Stabile'}</div></div>)})}</div>
+    <div className="card p-4"><h3 className="font-display text-xl mb-3">Chilometri al mese</h3><div className="h-64"><ResponsiveContainer><LineChart data={mon}>
+      <CartesianGrid stroke="#1a1f2a"/><XAxis dataKey="m" {...ax}/><YAxis {...ax}/><Tooltip {...tip}/><Legend/>
+      {S.map(s=><Line key={s} type="monotone" dataKey={s} name={SP[s].n} stroke={SP[s].c} strokeWidth={2.5} dot={false}/>)}</LineChart></ResponsiveContainer></div></div>
+    <div className="card p-4"><h3 className="font-display text-xl">Trend fisiologico</h3><p className="text-xs text-zinc-500 mb-3">Variazione % di passo (corsa, nuoto) e velocità media (ciclismo) rispetto al primo mese. Sopra lo zero è un miglioramento.</p>
+      <div className="h-64"><ResponsiveContainer><LineChart data={tr}><CartesianGrid stroke="#1a1f2a"/><XAxis dataKey="m" {...ax}/><YAxis unit="%" {...ax}/><Tooltip {...tip}/><Legend/>
+      {S.map(s=><Line key={s} type="monotone" dataKey={s} name={SP[s].n} stroke={SP[s].c} strokeWidth={2.5} connectNulls dot={{r:3}}/>)}</LineChart></ResponsiveContainer></div></div>
+  </div>);
+}
+
+/* ---------- Impostazioni ---------- */
+function Settings({setWs}){
+  const[k,setK]=useState(ls('tl_key','')),[m,setM]=useState(ls('tl_model','gemini-2.5-flash')),[msg,setMsg]=useState('');
+  const save=()=>{sv('tl_key',k.trim());sv('tl_model',m.trim()||'gemini-2.5-flash');setMsg('Salvato in questo browser.')};
+  const test=async()=>{save();setMsg('Provo la connessione…');try{await gem([{text:'Rispondi solo con {"ok":true}'}]);setMsg('Connessione riuscita.')}catch(e){setMsg(e.message)}};
+  return(<div className="card p-5 max-w-xl space-y-4" style={{'--ac':'#a78bfa'}}>
+    <h2 className="font-display text-2xl">Impostazioni</h2>
+    <label className="block text-sm text-zinc-400">GEMINI_API_KEY
+      <input type="password" autoComplete="off" className="inp mt-1 text-zinc-100" value={k} onChange={e=>setK(e.target.value)} placeholder="Incolla la chiave"/></label>
+    <label className="block text-sm text-zinc-400">Modello
+      <input className="inp mt-1 text-zinc-100" value={m} onChange={e=>setM(e.target.value)}/></label>
+    <p className="text-xs text-zinc-500">La chiave resta nel localStorage del tuo browser e le richieste partono direttamente da qui verso Google. Creala gratis in Google AI Studio (aistudio.google.com/apikey). Con il piano gratuito Google può usare i contenuti inviati per migliorare i suoi modelli: evita screenshot con dati che non vuoi condividere.</p>
+    <div className="flex flex-wrap gap-2"><button className="btn" onClick={save}>Salva chiave</button><button className="btn ghost" onClick={test}>Prova connessione</button>
+      <button className="btn ghost ml-auto" onClick={()=>{if(confirm('Cancellare allenamenti e parametri fisici? Se vuoi tenerli, esporta prima un backup in Dati & Backup.')){setWs([]);localStorage.removeItem('tl_body');location.reload()}}}>Cancella i dati</button></div>
+    {msg&&<p className="text-sm text-zinc-300">{msg}</p>}
+  </div>);
+}
+
+/* ---------- Gestione dati e backup ---------- */
+const KEYS=['tl_ws','tl_body','tl_key','tl_model'];
+const valid={
+  tl_ws:a=>Array.isArray(a)&&a.every(w=>w&&SP[w.sport]&&/^\d{4}-\d{2}-\d{2}/.test(w.date)&&isFinite(+w.km)&&isFinite(+w.min)),
+  tl_body:b=>b&&typeof b==='object'&&['h','w','age'].every(k=>isFinite(+b[k])),
+  tl_key:s=>typeof s==='string',
+  tl_model:s=>typeof s==='string'};
+function Backup(){
+  const[inclKey,setInclKey]=useState(true),[msg,setMsg]=useState(''),[bad,setBad]=useState(false);
+  const say=(t,e=false)=>{setMsg(t);setBad(e)};
+  const exportBk=()=>{
+    const data={};
+    KEYS.forEach(k=>{if(k==='tl_key'&&!inclKey)return;const v=ls(k,null);if(v!==null&&v!=='')data[k]=v});
+    const url=URL.createObjectURL(new Blob([JSON.stringify({app:'training-lab',versione:1,esportato:new Date().toISOString(),data},null,2)],{type:'application/json'}));
+    const a=document.createElement('a');a.href=url;a.download=`training-lab-backup-${today()}.json`;
+    document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    say('Backup scaricato.');
+  };
+  const importBk=async e=>{
+    const f=e.target.files[0];e.target.value='';if(!f)return;
+    try{
+      const j=JSON.parse(await f.text());
+      if(j?.app!=='training-lab'||!j.data||typeof j.data!=='object')throw new Error('Questo file non è un backup di Training Lab.');
+      const ks=Object.keys(j.data).filter(k=>KEYS.includes(k));
+      if(!ks.length)throw new Error('Il file non contiene dati da ripristinare.');
+      const wrong=ks.find(k=>!valid[k](j.data[k]));
+      if(wrong)throw new Error(`Dati non validi in “${wrong}”: il file è danneggiato o è stato modificato.`);
+      if(!confirm(`Sovrascrivere i dati attuali con il backup${ks.includes('tl_ws')?' ('+j.data.tl_ws.length+' allenamenti)':''}?`))return;
+      ks.forEach(k=>sv(k,j.data[k]));
+      say('Backup ripristinato, ricarico la pagina…');setTimeout(()=>location.reload(),600);
+    }catch(x){say(x instanceof SyntaxError?'Il file non è un JSON valido.':x.message,true)}
+  };
+  return(<div className="card p-5 max-w-xl space-y-4" style={{'--ac':'#a78bfa'}}>
+    <h2 className="font-display text-2xl">Gestione Dati & Backup</h2>
+    <p className="text-sm text-zinc-400">Allenamenti, parametri fisici e impostazioni vivono solo nel localStorage di questo browser. I recap annuali si calcolano dagli allenamenti, quindi sono già inclusi. Esporta un backup per spostarti su un altro browser o PC.</p>
+    <label className="flex items-start gap-2 text-sm text-zinc-300"><input type="checkbox" checked={inclKey} onChange={e=>setInclKey(e.target.checked)} className="mt-1 accent-violet-400"/>
+      <span>Includi la GEMINI_API_KEY nel file. Resta scritta in chiaro: conserva il backup in un posto privato.</span></label>
+    <div className="flex flex-wrap gap-2">
+      <button className="btn" onClick={exportBk}>Esporta backup</button>
+      <label className="btn ghost inline-block cursor-pointer">Importa backup<input type="file" accept=".json,application/json" hidden onChange={importBk}/></label></div>
+    <p className="text-xs text-zinc-500">L’importazione sovrascrive i dati presenti nel file. Se il backup non contiene la chiave, resta quella attuale.</p>
+    {msg&&<p className={'text-sm '+(bad?'text-rose-400':'text-zinc-300')}>{msg}</p>}
+  </div>);
+}
+
+/* ---------- App ---------- */
+function App(){
+  const[tab,setTab]=useState('analisi'),[ws,setWs]=useLS('tl_ws',[]);
+  const T=[['analisi','Analisi'],['nuoto','Nuoto'],['fisico','Fisiologia'],['recap','Recap'],['dati','Dati & Backup'],['imp','Impostazioni']];
+  return(<div>
+    <header className="sticky top-0 z-10 backdrop-blur bg-[#08090d]/85 border-b border-white/5">
+      <nav className="max-w-6xl mx-auto px-4 flex items-center gap-1 overflow-x-auto">
+        <b className="font-display text-xl mr-4 py-3 text-violet-300">Training Lab</b>
+        {T.map(([id,l])=><button key={id} onClick={()=>setTab(id)} className={'px-3 py-3 text-sm whitespace-nowrap border-b-2 '+(tab===id?'border-violet-400 text-white':'border-transparent text-zinc-500 hover:text-zinc-300')}>{l}</button>)}
+      </nav></header>
+    <main className="max-w-6xl mx-auto p-4 md:p-6">
+      {!ls('tl_key','')&&tab!=='imp'&&<button onClick={()=>setTab('imp')} className="w-full mb-4 text-left text-sm card p-3 text-amber-300">Prima di analizzare gli allenamenti aggiungi la tua GEMINI_API_KEY in Impostazioni.</button>}
+      {tab==='analisi'&&<Analyze ws={ws} setWs={setWs}/>}
+      {tab==='nuoto'&&<Swim/>}
+      {tab==='fisico'&&<Body ws={ws}/>}
+      {tab==='recap'&&<Recap ws={ws} setWs={setWs}/>}
+      {tab==='dati'&&<Backup/>}
+      {tab==='imp'&&<Settings setWs={setWs}/>}
+    </main></div>);
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
